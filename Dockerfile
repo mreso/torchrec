@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.2.1-cudnn8-devel-ubuntu20.04
+FROM nvidia/cuda:11.3.1-cudnn8-devel-ubuntu20.04
 ENV PATH="/root/miniconda3/bin:${PATH}"
 ARG PATH="/root/miniconda3/bin:${PATH}"
 RUN apt-get update
@@ -20,8 +20,10 @@ RUN git clone --recursive https://github.com/pytorch/FBGEMM \
     && python setup.py install -DCUDNN_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libcudnn.so -DCUDNN_INCLUDE_PATH=/usr/include/x86_64-linux-gnu/
 
 RUN git clone --recursive https://github.com/facebookresearch/torchrec \
-    && cd torchrec/ \
-    && python setup.py build develop --skip_fbgemm
+    && cd torchrec/ 
+WORKDIR /torchrec
+RUN git checkout 932d9bb5b4bf765e4e238184774d46b745a65ad6
+RUN python setup.py build develop --skip_fbgemm
 
 RUN pip install torchx-nightly
 
