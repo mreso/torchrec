@@ -21,7 +21,7 @@ from torchrec.datasets.criteo import DEFAULT_CAT_NAMES, DEFAULT_INT_NAMES
 from torchrec.datasets.utils import Batch
 from torchrec.distributed import TrainPipelineSparseDist
 from torchrec.distributed.model_parallel import DistributedModelParallel
-from torchrec.examples.dlrm.data.dlrm_dataloader import get_dataloader, STAGES
+from data.dlrm_dataloader import get_dataloader, STAGES
 from torchrec.examples.dlrm.modules.dlrm_train import DLRMTrain
 from torchrec.modules.embedding_configs import EmbeddingBagConfig
 from torchrec.optim.keyed import KeyedOptimizerWrapper
@@ -125,6 +125,13 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         default=None,
         help="Path to a folder containing the binary (npy) files for the Criteo dataset."
         " When supplied, InMemoryBinaryCriteoIterDataPipe is used.",
+    )
+    parser.add_argument(
+        "--s3_criteo_prefix",
+        type=str,
+        default=None,
+        help="S3 bucket prefix for the Criteo dataset."
+        " When supplied, S3CriteoIterDataPipe is used.",
     )
     parser.add_argument(
         "--learning_rate",

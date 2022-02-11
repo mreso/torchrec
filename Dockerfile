@@ -27,3 +27,25 @@ RUN python setup.py build develop --skip_fbgemm
 
 RUN pip install torchx-nightly
 
+RUN cd / \
+    && git clone --recurse-submodules https://github.com/aws/aws-sdk-cpp \
+    && cd aws-sdk-cpp/ \
+    && mkdir sdk-build \
+    && cd sdk-build \
+    && cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" \
+    && make \
+    && make install 
+
+RUN conda install -y pybind11 -c conda-forge \
+    && apt install -y libz-dev libcurl4-openssl-dev libssh-dev \
+    && cd / \
+    && git clone https://github.com/ydaiming/data.git \
+    && cd data/ \
+    && git checkout s3-datapipes \
+    && export BUILD_S3=1 \
+    && python setup.py build \
+    && python setup.py install
+
+
+COPY credentials /root/.aws/credentials
+
