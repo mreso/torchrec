@@ -42,6 +42,7 @@ RUN conda install -y pybind11 -c conda-forge \
     && git clone https://github.com/ydaiming/data.git \
     && cd data/ \
     && git checkout s3-datapipes \
+    && git checkout b1e00513a25380b43d7e0aa5c3f521519e2c953a \
     && export BUILD_S3=1 \
     && python setup.py build \
     && python setup.py install
