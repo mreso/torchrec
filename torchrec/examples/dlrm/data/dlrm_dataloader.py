@@ -12,6 +12,7 @@ from typing import List
 from torch import distributed as dist
 from torch.utils.data import DataLoader
 from torchrec.datasets.criteo import (
+    INT_FEATURE_COUNT,
     CAT_FEATURE_COUNT,
     DEFAULT_CAT_NAMES,
     DEFAULT_INT_NAMES,
@@ -34,8 +35,11 @@ from typing import (
 from torchrec.datasets.criteo import _default_row_mapper
 from torch.utils.data import IterDataPipe
 from torchdata.datapipes.iter import S3FileLister, S3FileLoader
-from torchrec.datasets.utils import ReadLinesFromCSV
+from torchrec.datasets.utils import ReadLinesFromCSV, safe_cast, Batch
 import torch.utils.data.datapipes as dp
+import io
+import numpy as np
+from torchrec.sparse.jagged_tensor import KeyedJaggedTensor
 
 STAGES = ["train", "val", "test"]
 DAYS = 24
@@ -87,6 +91,47 @@ class S3CriteoIterDataPipe(IterDataPipe):
         self.row_mapper = row_mapper
         self.open_kw: Any = open_kw  # pyre-ignore[4]
 
+        batch_size = open_kw['batch_size']
+
+         # These values are the same for the KeyedJaggedTensors in all batches, so they
+        # are computed once here. This avoids extra work from the KeyedJaggedTensor sync
+        # functions.
+        self._num_ids_in_batch: int = CAT_FEATURE_COUNT * batch_size
+        self.keys: List[str] = DEFAULT_CAT_NAMES
+        self.lengths: torch.Tensor = torch.ones(
+            (self._num_ids_in_batch,), dtype=torch.int32
+        )
+        self.offsets: torch.Tensor = torch.arange(
+            0, self._num_ids_in_batch + 1, dtype=torch.int32
+        )
+        self.stride = batch_size
+        self.length_per_key: List[int] = CAT_FEATURE_COUNT * [batch_size]
+        self.offset_per_key: List[int] = [
+            batch_size * i for i in range(CAT_FEATURE_COUNT + 1)
+        ]
+        self.index_per_key: Dict[str, int] = {
+            key: i for (i, key) in enumerate(self.keys)
+        }
+
+    def _np_arrays_to_batch(
+        self, dense: np.ndarray, sparse: np.ndarray, labels: np.ndarray
+    ) -> Batch:
+        return Batch(
+            dense_features=torch.from_numpy(dense),
+            sparse_features=KeyedJaggedTensor(
+                keys=self.keys,
+                # transpose + reshape(-1) incurs an additional copy.
+                values=torch.from_numpy(sparse.transpose(1, 0).reshape(-1)),
+                lengths=self.lengths,
+                offsets=self.offsets,
+                stride=self.stride,
+                length_per_key=self.length_per_key,
+                offset_per_key=self.offset_per_key,
+                index_per_key=self.index_per_key,
+            ),
+            labels=torch.from_numpy(labels.reshape(-1)),
+        )
+
     # pyre-ignore[3]
     def __iter__(self) -> Iterator[Any]:
         worker_info = torch.utils.data.get_worker_info()
@@ -102,8 +147,91 @@ class S3CriteoIterDataPipe(IterDataPipe):
         datapipe = ReadLinesFromCSV(datapipe, delimiter="\t")
         if self.row_mapper:
             datapipe = dp.iter.Mapper(datapipe, self.row_mapper)
+            # datapipe = dp.iter.Mapper(datapipe, self._np_arrays_to_batch)
         yield from datapipe
 
+class NpToBatchIterDataPipe(IterDataPipe):
+    """
+    IterDataPipe that can be used to stream either the Criteo 1TB Click Logs Dataset
+    (https://ailab.criteo.com/download-criteo-1tb-click-logs-dataset/) or the
+    Kaggle/Criteo Display Advertising Dataset
+    (https://www.kaggle.com/c/criteo-display-ad-challenge/) from the source TSV
+    files.
+    Args:
+        paths (Iterable[str]): local paths to TSV files that constitute the Criteo
+            dataset.
+        row_mapper (Optional[Callable[[List[str]], Any]]): function to apply to each
+            split TSV line.
+        open_kw: options to pass to underlying invocation of
+            iopath.common.file_io.PathManager.open.
+    Example:
+        >>> datapipe = CriteoIterDataPipe(
+        >>>     ("/home/datasets/criteo/day_0.tsv", "/home/datasets/criteo/day_1.tsv")
+        >>> )
+        >>> datapipe = dp.iter.Batcher(datapipe, 100)
+        >>> datapipe = dp.iter.Collator(datapipe)
+        >>> batch = next(iter(datapipe))
+    """
+
+    def __init__(
+        self,
+        datapipe,
+        batch_size,
+        *,
+        # pyre-ignore[2]
+        row_mapper: Optional[Callable[[List[str]], Any]] = _default_row_mapper,
+        # pyre-ignore[2]
+        **open_kw,
+    ) -> None:
+        self.datapipe = datapipe
+        self.open_kw: Any = open_kw  # pyre-ignore[4]
+
+         # These values are the same for the KeyedJaggedTensors in all batches, so they
+        # are computed once here. This avoids extra work from the KeyedJaggedTensor sync
+        # functions.
+        self._num_ids_in_batch: int = CAT_FEATURE_COUNT * batch_size
+        self.keys: List[str] = DEFAULT_CAT_NAMES
+        self.lengths: torch.Tensor = torch.ones(
+            (self._num_ids_in_batch,), dtype=torch.int32
+        )
+        self.offsets: torch.Tensor = torch.arange(
+            0, self._num_ids_in_batch + 1, dtype=torch.int32
+        )
+        self.stride = batch_size
+        self.length_per_key: List[int] = CAT_FEATURE_COUNT * [batch_size]
+        self.offset_per_key: List[int] = [
+            batch_size * i for i in range(CAT_FEATURE_COUNT + 1)
+        ]
+        self.index_per_key: Dict[str, int] = {
+            key: i for (i, key) in enumerate(self.keys)
+        }
+
+    def _np_arrays_to_batch(
+        self, dense: np.ndarray, sparse: np.ndarray, labels: np.ndarray
+    ) -> Batch:
+        return Batch(
+            dense_features=dense,
+            sparse_features=KeyedJaggedTensor(
+                keys=self.keys,
+                # transpose + reshape(-1) incurs an additional copy.
+                # values=sparse.transpose(1, 0).reshape(-1),
+                values=sparse.reshape(-1),
+                lengths=self.lengths,
+                offsets=self.offsets,
+                stride=self.stride,
+                length_per_key=self.length_per_key,
+                offset_per_key=self.offset_per_key,
+                index_per_key=self.index_per_key,
+            ),
+            labels=labels.reshape(-1),
+        )
+
+    # pyre-ignore[3]
+    def __iter__(self) -> Iterator[Any]:
+        for data in self.datapipe:
+            if dist.get_rank() == 0:
+                print(data)
+            yield self._np_arrays_to_batch(*data)
 
 def _get_s3_dataloader(
     args: argparse.Namespace,
@@ -135,16 +263,53 @@ def _get_s3_dataloader(
 
     s3_urls_buffers = S3FileLoader(s3_urls)
 
-    dataloader = DataLoader(
-        S3CriteoIterDataPipe(
+    def row_mapper(row: List[str]) -> Tuple[List[int], List[int], int]:
+        label = safe_cast(row[0], int, 0)
+        dense = [safe_cast(row[i], int, 0) for i in range(1, 1 + INT_FEATURE_COUNT)]
+        sparse = [
+            int(safe_cast(row[i], str, "0") or "0", 16)
+            for i in range(
+                1 + INT_FEATURE_COUNT, 1 + INT_FEATURE_COUNT + CAT_FEATURE_COUNT
+            )
+        ]
+        return dense, sparse, label  # pyre-ignore[7]
+
+    datapipe = S3CriteoIterDataPipe(
             s3_urls_buffers,
+            row_mapper=row_mapper,
             batch_size=args.batch_size,
             rank=rank,
             world_size=world_size,
             hashes=args.num_embeddings_per_feature
             if args.num_embeddings is None
             else ([args.num_embeddings] * CAT_FEATURE_COUNT),
-        ),
+        )
+    datapipe = dp.iter.Batcher(datapipe, args.batch_size)
+
+    def my_collate(batch):
+        buffer = 3*[None,]
+        dtypes = [torch.float32, torch.int64, torch.int64]
+        for samples in batch:
+            for idx, arr in enumerate(samples):
+                if buffer[idx] is None:
+                    buffer[idx] = torch.as_tensor(arr, dtype=dtypes[idx])
+                else:
+                    buffer[idx] = torch.vstack((buffer[idx], torch.as_tensor(arr, dtype=dtypes[idx])))
+
+        dense, sparse, labels = buffer
+        dense += 3
+        dense = torch.log(dense)
+
+        labels = labels.reshape((-1, 1))
+
+        return dense, sparse, labels
+
+    datapipe = dp.iter.Collator(datapipe, collate_fn=my_collate)
+
+    datapipe = NpToBatchIterDataPipe(datapipe, args.batch_size)
+
+    dataloader = DataLoader(
+        datapipe,
         batch_size=None,
         pin_memory=pin_memory,
         collate_fn=lambda x: x,
